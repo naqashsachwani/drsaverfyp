@@ -1,101 +1,94 @@
 import prisma from "@/lib/prisma";
 import { getAuth } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
-import imagekit from "@/configs/imageKit";
+import { randomUUID } from "crypto";
 
-export async function POST(request) {
-    try {
-        const {userId} = getAuth(request)
-        //Get the data from the form
-        const formData = await request.formData()
+export async function POST(req, { params }) {
+  const { userId } = getAuth(req);
+  const goalId = params.goalId;
 
-        const name = formData.get("name")
-        const username = formData.get("username")
-        const description = formData.get("description")
-        const email = formData.get("email")
-        const contact = formData.get("contact")
-        const address = formData.get("address")
-        const image = formData.get("image")
-        
-        if (!name || !username || !description || !email || !contact || !address || !image){
-            return NextResponse.json({error: "missing store info"}, {status: 400})
-        }
-        //check if vendor have already registered a store
-        const store = await prisma.store.findFirst({
-            where: { userId: userId}
-        })
-        //if store is already registered then send status of store
-        if(store){
-            return NextResponse.json({status: store.status})
-        }
-        //check if username already taken
-        const isUsernameTaken = await prisma.store.findFirst({
-            where: { username: username.toLowerCase() }
-        })
+  if (!userId)
+    return NextResponse.json({ error: "Unauthenticated" }, { status: 401 });
 
-        if(isUsernameTaken){
-            return NextResponse.json({error: "username already taken"}, {status: 400})
-        }
+  const { amount, stripePaymentId } = await req.json();
+  const depositAmount = Number(amount);
 
-        // image upload to imageKit
-        const buffer = Buffer.from(await image.arrayBuffer());
-        const response = await imagekit.upload({
-            file: buffer,
-            fileName: image.name,
-            folder: "logos"
-        })
+  if (!depositAmount || depositAmount <= 0)
+    return NextResponse.json({ error: "Invalid amount" }, { status: 400 });
 
-        const optimizedImage = imagekit.url({
-            path: response.filePath,
-            transform: [
-                {quality: 'auto'},
-                {format: 'webp'},
-                {width: '512'}
-            ]
-        })
+  const goal = await prisma.goal.findUnique({
+    where: { id: goalId },
+    include: { product: true },
+  });
 
-        const newStore = await prisma.store.create({
-            data: {
-                userId,
-                name,
-                description,
-                username: username.toLowerCase(),
-                email,
-                contact,
-                address,
-                logo: optimizedImage
-            }
-        })
+  if (!goal)
+    return NextResponse.json({ error: "Goal not found" }, { status: 404 });
 
-        // link store to user
-        await prisma.user.update({
-            where: {id: userId },
-            data: { store: {connect: {id: newStore.id}}}
-        })
+  if (goal.status !== "ACTIVE")
+    return NextResponse.json({ error: "Goal not active" }, { status: 400 });
 
-        return NextResponse.json({message: "applied, waiting for approval"})
+  /* ================= TRANSACTION ================= */
+  const transaction = await prisma.transaction.create({
+    data: {
+      userId,
+      goalId,
+      amount: depositAmount,
+      provider: "stripe",
+      providerPaymentId: stripePaymentId,
+      status: "COMPLETED",
+    },
+  });
 
-    } catch (error){
-        console.error(error);
-        return NextResponse.json({error: error.code || error.message}, { status: 400})
-    }
-}
+  /* ================= DEPOSIT ================= */
+  await prisma.deposit.create({
+    data: {
+      goalId,
+      productId: goal.productId,
+      userId,
+      amount: depositAmount,
+      paymentMethod: "STRIPE",
+      status: "COMPLETED",
+      receiptNumber: randomUUID(),
+      stripePaymentId,
+    },
+  });
 
-//check if user have already registered a store  if yes then send status to store
-export async function GET(request){
-    try {
-        const {userId} = getAuth(request)
-           // check if user have already registered a store
-           const store = await prisma.store.findFirst({
-            where: { userId: userId}
-           })
-           // if store is already registered then send status of store
-           if(store){
-              return NextResponse.json({status: store.status})
-           }
-           return NextResponse.json({status: "not registered"})
-    } catch (error) {
-        console.error(error);
-        return NextResponse.json({error: error.code || error.message}, { status: 400})
-    }
+  /* ================= UPDATE GOAL ================= */
+  const newSaved = Number(goal.saved) + depositAmount;
+
+  const updatedGoal = await prisma.goal.update({
+    where: { id: goalId },
+    data: {
+      saved: newSaved,
+      status:
+        newSaved >= Number(goal.targetAmount)
+          ? "COMPLETED"
+          : "ACTIVE",
+    },
+  });
+
+  /* ================= INVOICE ================= */
+  await prisma.invoice.create({
+    data: {
+      invoiceNumber: `INV-${Date.now()}`,
+      userId,
+      goalId,
+      amount: depositAmount,
+      status: "PAID",
+      paidAt: new Date(),
+    },
+  });
+
+  /* ================= NOTIFICATION ================= */
+  await prisma.notification.create({
+    data: {
+      userId,
+      goalId,
+      type: "PAYMENT_CONFIRMATION",
+      title: "Deposit Successful",
+      message: `Your deposit of ${depositAmount} has been added.`,
+    },
+  });
+
+  return NextResponse.json({ success: true });
 }
