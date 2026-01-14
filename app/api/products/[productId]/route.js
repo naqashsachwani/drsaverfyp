@@ -2,8 +2,7 @@ import prisma from "@/lib/prisma";
 import { NextResponse } from "next/server";
 
 export async function GET(request, context) {
-  const { params } = await context; // ✅ Await the context object
-  const { productId } = params;
+  const { productId } = context.params; // ✅ fix here
 
   if (!productId) {
     return NextResponse.json({ error: "Product ID is required" }, { status: 400 });
