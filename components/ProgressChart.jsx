@@ -1,18 +1,7 @@
 "use client";
 
-import {
-  Chart as ChartJS,
-  CategoryScale,
-  LinearScale,
-  BarElement,
-  Title,
-  Tooltip,
-  Legend,
-} from "chart.js";
 import { Bar } from "react-chartjs-2";
-
-// Register necessary chart components and scales
-ChartJS.register(CategoryScale, LinearScale, BarElement, Title, Tooltip, Legend);
+import "chart.js/auto";
 
 export default function ProgressChart({ goals }) {
   if (!goals || goals.length === 0) return <p>No goals to display</p>;
